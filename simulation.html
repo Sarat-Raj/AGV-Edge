@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Warehouse AGV - Live Simulation</title>
+    <meta charset="utf-8">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; color: #fff; font-family: 'Courier New', monospace; }
+        #header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; }
+        #header h1 { font-size: 16px; letter-spacing: 2px; }
+        #controls { display: flex; gap: 10px; align-items: center; }
+        #controls button { background: #000; color: #fff; border: 1px solid #555; padding: 5px 12px; font-family: inherit; font-size: 12px; cursor: pointer; }
+        #controls button:hover { border-color: #fff; }
+        #controls button.active { border-color: #fff; background: #222; }
+        #controls select { background: #000; color: #fff; border: 1px solid #555; padding: 5px 8px; font-family: inherit; font-size: 12px; }
+        #main { display: flex; height: calc(100vh - 45px); }
+        #canvas-wrap { flex: 1; display: flex; justify-content: center; align-items: center; }
+        canvas { border: 1px solid #333; }
+        #sidebar { width: 280px; border-left: 1px solid #333; padding: 15px; overflow-y: auto; font-size: 11px; }
+        #sidebar h2 { font-size: 12px; letter-spacing: 1px; margin-bottom: 10px; border-bottom: 1px solid #333; padding-bottom: 5px; }
+        #sidebar .section { margin-bottom: 15px; }
+        #sidebar .label { color: #888; }
+        #sidebar .value { margin-bottom: 4px; }
+        #log { margin-top: 10px; border-top: 1px solid #333; padding-top: 10px; max-height: 200px; overflow-y: auto; }
+        #log .entry { margin-bottom: 3px; color: #888; }
+        #log .entry.sign { color: #fff; }
+        #log .entry.goal { color: #fff; font-weight: bold; }
+        #command-bar { position: fixed; bottom: 0; left: 0; right: 280px; border-top: 1px solid #333; padding: 10px 20px; background: #000; display: flex; gap: 10px; }
+        #command-bar input { flex: 1; background: #000; border: 1px solid #555; color: #fff; padding: 8px 12px; font-family: inherit; font-size: 13px; }
+        #command-bar input:focus { outline: none; border-color: #fff; }
+        #command-bar button { background: #000; color: #fff; border: 1px solid #555; padding: 8px 16px; font-family: inherit; cursor: pointer; }
+        #command-bar button:hover { border-color: #fff; }
+        #legend { font-size: 10px; color: #666; margin-top: 10px; }
+        #legend span { margin-right: 12px; }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h1>WAREHOUSE AGV -- SIMULATION</h1>
+        <div id="controls">
+            <button id="btn-explore" class="active">EXPLORE</button>
+            <button id="btn-reset">RESET</button>
+            <select id="speed-select">
+                <option value="1">1x Speed</option>
+                <option value="2" selected>2x Speed</option>
+                <option value="5">5x Speed</option>
+                <option value="10">10x Speed</option>
+            </select>
+        </div>
+    </div>
+    <div id="main">
+        <div id="canvas-wrap">
+            <canvas id="map" width="700" height="500"></canvas>
+        </div>
+        <div id="sidebar">
+            <div class="section">
+                <h2>ROBOT STATE</h2>
+                <div class="label">Position:</div>
+                <div class="value" id="s-pos">(0.00, 0.00)</div>
+                <div class="label">Heading:</div>
+                <div class="value" id="s-hdg">0 deg</div>
+                <div class="label">Mode:</div>
+                <div class="value" id="s-mode">EXPLORE</div>
+                <div class="label">Speed:</div>
+                <div class="value" id="s-speed">0.25 m/s</div>
+            </div>
+            <div class="section">
+                <h2>MAP</h2>
+                <div class="label">Voxels:</div>
+                <div class="value" id="s-voxels">0</div>
+                <div class="label">Signs found:</div>
+                <div class="value" id="s-signs">0</div>
+                <div class="label">Distance traveled:</div>
+                <div class="value" id="s-dist">0.0 m</div>
+            </div>
+            <div class="section">
+                <h2>LANDMARKS</h2>
+                <div id="s-landmarks">None yet</div>
+            </div>
+            <div class="section">
+                <h2>LOG</h2>
+                <div id="log"></div>
+            </div>
+            <div id="legend">
+                <span>## = wall</span>
+                <span>.. = free</span>
+                <span>[R] = robot</span>
+                <span>[*] = sign</span>
+                <span>[!] = goal</span>
+            </div>
+        </div>
+    </div>
+    <div id="command-bar">
+        <input type="text" id="command-input" placeholder="Type a command: go to H4, explore, stop" autofocus>
+        <button id="btn-send">SEND</button>
+    </div>
+
+    <script>
+    // --- Warehouse Layout (predefined but robot doesn't know it) ---
+    const WAREHOUSE = {
+        walls: [],
+        signs: [
+            { label: "H1", x: -6, y: 0 },
+            { label: "H2", x: -3, y: 0 },
+            { label: "H3", x: 0, y: 0 },
+            { label: "H4", x: 3, y: 0 },
+            { label: "H5", x: 6, y: 0 },
+            { label: "H6", x: 9, y: 0 },
+            { label: "J1", x: -6, y: -6 },
+            { label: "J2", x: -3, y: -6 },
+            { label: "J3", x: 0, y: -6 },
+            { label: "J4", x: 3, y: -6 },
+        ],
+        aisleWidth: 2.0,
+        shelfDepth: 1.0,
+    };
+
+    // Generate walls (shelves between aisles)
+    function generateWalls() {
+        WAREHOUSE.walls = [];
+        // Top row of shelves (H aisle)
+        for (let x = -8; x <= 11; x += 0.2) {
+            WAREHOUSE.walls.push({ x: x, y: 1.2 });
+            WAREHOUSE.walls.push({ x: x, y: -1.2 });
+        }
+        // Bottom row of shelves (J aisle)
+        for (let x = -8; x <= 5; x += 0.2) {
+            WAREHOUSE.walls.push({ x: x, y: -4.8 });
+            WAREHOUSE.walls.push({ x: x, y: -7.2 });
+        }
+        // Connecting walls (ends)
+        for (let y = -7.2; y <= 1.2; y += 0.2) {
+            WAREHOUSE.walls.push({ x: -8, y: y });
+            WAREHOUSE.walls.push({ x: 11, y: y });
+        }
+        // Cross-shelf (partial wall between H and J)
+        for (let x = -8; x <= 11; x += 0.2) {
+            if (Math.abs(x - (-4.5)) > 1.5 && Math.abs(x - 1.5) > 1.5 && Math.abs(x - 7.5) > 1.5) {
+                WAREHOUSE.walls.push({ x: x, y: -3.0 });
+            }
+        }
+    }
+    generateWalls();
+
+    // --- Robot State ---
+    let robot = {
+        x: -6, y: 0, theta: 0,
+        speed: 0.25,
+        mode: "EXPLORE",
+        goal: null,
+        path: [],
+        discovered: {},
+        exploredCells: new Set(),
+        wallCells: new Set(),
+        totalDist: 0,
+        targetTheta: 0,
+        turning: false,
+        instructionQueue: [],
+        paused: false,
+    };
+
+    let simSpeed = 2;
+    let logEntries = [];
+
+    // --- Utility ---
+    function cellKey(x, y) {
+        return `${Math.floor(x * 4)},${Math.floor(y * 4)}`;
+    }
+
+    function dist(x1, y1, x2, y2) {
+        return Math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2);
+    }
+
+    function normalizeAngle(a) {
+        while (a > Math.PI) a -= 2 * Math.PI;
+        while (a < -Math.PI) a += 2 * Math.PI;
+        return a;
+    }
+
+    function addLog(msg, cls) {
+        logEntries.push({ msg, cls: cls || "" });
+        if (logEntries.length > 50) logEntries.shift();
+        const logEl = document.getElementById("log");
+        logEl.innerHTML = logEntries.map(e => `<div class="entry ${e.cls}">${e.msg}</div>`).join("");
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // --- Sensor Simulation ---
+    function senseDepth(angle, maxRange) {
+        const steps = 20;
+        for (let i = 1; i <= steps; i++) {
+            const d = (i / steps) * maxRange;
+            const wx = robot.x + d * Math.cos(robot.theta + angle);
+            const wy = robot.y + d * Math.sin(robot.theta + angle);
+            for (const wall of WAREHOUSE.walls) {
+                if (dist(wx, wy, wall.x, wall.y) < 0.3) {
+                    return d;
+                }
+            }
+        }
+        return maxRange;
+    }
+
+    function senseZones() {
+        const left = Math.min(senseDepth(0.4, 3), senseDepth(0.6, 3));
+        const center = Math.min(senseDepth(-0.1, 3), senseDepth(0, 3), senseDepth(0.1, 3));
+        const right = Math.min(senseDepth(-0.4, 3), senseDepth(-0.6, 3));
+        return { left, center, right };
+    }
+
+    function senseSigns() {
+        for (const sign of WAREHOUSE.signs) {
+            const d = dist(robot.x, robot.y, sign.x, sign.y);
+            if (d < 1.5 && !(sign.label in robot.discovered)) {
+                robot.discovered[sign.label] = { x: sign.x, y: sign.y };
+                addLog(`[OCR] Discovered: ${sign.label} at (${sign.x.toFixed(1)}, ${sign.y.toFixed(1)})`, "sign");
+                if (robot.goal && sign.label === robot.goal) {
+                    addLog(`*** ARRIVED AT ${robot.goal}! ***`, "goal");
+                    robot.mode = "STOPPED";
+                    robot.goal = null;
+                }
+            }
+        }
+    }
+
+    function updateExploredArea() {
+        const range = 2.5;
+        const step = 0.25;
+        for (let dx = -range; dx <= range; dx += step) {
+            for (let dy = -range; dy <= range; dy += step) {
+                const wx = robot.x + dx;
+                const wy = robot.y + dy;
+                const key = cellKey(wx, wy);
+                let isWall = false;
+                for (const wall of WAREHOUSE.walls) {
+                    if (dist(wx, wy, wall.x, wall.y) < 0.25) {
+                        isWall = true;
+                        break;
+                    }
+                }
+                if (isWall) {
+                    robot.wallCells.add(key);
+                } else if (dist(0, 0, dx, dy) <= range) {
+                    robot.exploredCells.add(key);
+                }
+            }
+        }
+    }
+
+    // --- Movement Logic ---
+    function exploreStep(dt) {
+        const zones = senseZones();
+
+        if (zones.center > 1.5) {
+            // Clear ahead
+            robot.x += robot.speed * dt * Math.cos(robot.theta);
+            robot.y += robot.speed * dt * Math.sin(robot.theta);
+            robot.totalDist += robot.speed * dt;
+        } else if (zones.center > 0.6) {
+            // Slow
+            robot.x += robot.speed * 0.5 * dt * Math.cos(robot.theta);
+            robot.y += robot.speed * 0.5 * dt * Math.sin(robot.theta);
+            robot.totalDist += robot.speed * 0.5 * dt;
+        } else if (zones.right > zones.left) {
+            // Turn right
+            robot.theta -= 1.5 * dt;
+        } else if (zones.left > zones.right) {
+            // Turn left
+            robot.theta += 1.5 * dt;
+        } else {
+            // Dead end - turn around
+            robot.theta += 2.0 * dt;
+        }
+
+        robot.theta = normalizeAngle(robot.theta);
+    }
+
+    function navigateStep(dt) {
+        if (!robot.goal || !(robot.goal in robot.discovered)) {
+            // Goal unknown, explore to find it
+            exploreStep(dt);
+            return;
+        }
+
+        const target = robot.discovered[robot.goal];
+        const dx = target.x - robot.x;
+        const dy = target.y - robot.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+
+        if (d < 0.5) {
+            addLog(`*** ARRIVED AT ${robot.goal}! ***`, "goal");
+            robot.mode = "STOPPED";
+            robot.goal = null;
+            return;
+        }
+
+        const targetAngle = Math.atan2(dy, dx);
+        const angleDiff = normalizeAngle(targetAngle - robot.theta);
+
+        if (Math.abs(angleDiff) > 0.2) {
+            robot.theta += Math.sign(angleDiff) * 2.0 * dt;
+            robot.theta = normalizeAngle(robot.theta);
+        } else {
+            const zones = senseZones();
+            if (zones.center > 1.0) {
+                robot.x += robot.speed * dt * Math.cos(robot.theta);
+                robot.y += robot.speed * dt * Math.sin(robot.theta);
+                robot.totalDist += robot.speed * dt;
+            } else if (zones.right > zones.left) {
+                robot.theta -= 1.5 * dt;
+            } else {
+                robot.theta += 1.5 * dt;
+            }
+        }
+    }
+
+    // --- Simulation Loop ---
+    function simStep(dt) {
+        if (robot.mode === "STOPPED" || robot.paused) return;
+
+        if (robot.mode === "EXPLORE") {
+            exploreStep(dt);
+        } else if (robot.mode === "NAVIGATE") {
+            navigateStep(dt);
+        }
+
+        robot.path.push([robot.x, robot.y]);
+        if (robot.path.length > 500) robot.path.shift();
+
+        senseSigns();
+        updateExploredArea();
+    }
+
+    // --- Rendering ---
+    const canvas = document.getElementById("map");
+    const ctx = canvas.getContext("2d");
+    const PPM = 28;
+
+    function worldToPixel(wx, wy) {
+        const cx = robot.x;
+        const cy = robot.y;
+        const px = canvas.width / 2 + (wx - cx) * PPM;
+        const py = canvas.height / 2 - (wy - cy) * PPM;
+        return [px, py];
+    }
+
+    function render() {
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Grid
+        ctx.strokeStyle = "#111";
+        ctx.lineWidth = 0.5;
+        for (let x = -20; x < 20; x++) {
+            const [px] = worldToPixel(x, 0);
+            ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, canvas.height); ctx.stroke();
+        }
+        for (let y = -20; y < 20; y++) {
+            const [, py] = worldToPixel(0, y);
+            ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(canvas.width, py); ctx.stroke();
+        }
+
+        // Explored area
+        ctx.fillStyle = "#1a1a1a";
+        for (const key of robot.exploredCells) {
+            const [vx, vy] = key.split(",").map(Number);
+            const wx = (vx + 0.5) / 4;
+            const wy = (vy + 0.5) / 4;
+            const [px, py] = worldToPixel(wx, wy);
+            const s = PPM / 4;
+            if (px > -s && px < canvas.width + s && py > -s && py < canvas.height + s) {
+                ctx.fillRect(px - s / 2, py - s / 2, s, s);
+            }
+        }
+
+        // Walls
+        ctx.fillStyle = "#fff";
+        for (const key of robot.wallCells) {
+            const [vx, vy] = key.split(",").map(Number);
+            const wx = (vx + 0.5) / 4;
+            const wy = (vy + 0.5) / 4;
+            const [px, py] = worldToPixel(wx, wy);
+            const s = PPM / 4;
+            if (px > -s && px < canvas.width + s && py > -s && py < canvas.height + s) {
+                ctx.fillRect(px - s / 2, py - s / 2, s, s);
+            }
+        }
+
+        // Path trail
+        if (robot.path.length > 1) {
+            ctx.strokeStyle = "#333";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            const [sx, sy] = worldToPixel(robot.path[0][0], robot.path[0][1]);
+            ctx.moveTo(sx, sy);
+            for (let i = 1; i < robot.path.length; i++) {
+                const [px, py] = worldToPixel(robot.path[i][0], robot.path[i][1]);
+                ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+        }
+
+        // Landmarks
+        for (const [label, lm] of Object.entries(robot.discovered)) {
+            const [px, py] = worldToPixel(lm.x, lm.y);
+            const isGoal = robot.goal && label === robot.goal;
+
+            ctx.strokeStyle = isGoal ? "#fff" : "#888";
+            ctx.lineWidth = isGoal ? 2 : 1;
+            ctx.beginPath();
+            ctx.arc(px, py, 8, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.fillStyle = isGoal ? "#fff" : "#888";
+            ctx.font = "bold 11px Courier New";
+            ctx.textAlign = "center";
+            ctx.fillText(label, px, py - 13);
+
+            if (isGoal) {
+                ctx.fillText("[!]", px, py + 4);
+            } else {
+                ctx.fillText("*", px, py + 4);
+            }
+        }
+
+        // Unknown signs (faint hint)
+        for (const sign of WAREHOUSE.signs) {
+            if (!(sign.label in robot.discovered)) {
+                const [px, py] = worldToPixel(sign.x, sign.y);
+                if (px > 0 && px < canvas.width && py > 0 && py < canvas.height) {
+                    ctx.fillStyle = "#222";
+                    ctx.font = "9px Courier New";
+                    ctx.textAlign = "center";
+                    ctx.fillText("?", px, py + 3);
+                }
+            }
+        }
+
+        // Robot
+        const [rx, ry] = worldToPixel(robot.x, robot.y);
+
+        // Body
+        ctx.fillStyle = "#fff";
+        ctx.beginPath();
+        ctx.arc(rx, ry, 6, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Heading
+        const arrowLen = 18;
+        const ex = rx + arrowLen * Math.cos(robot.theta);
+        const ey = ry - arrowLen * Math.sin(robot.theta);
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(rx, ry);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+
+        // FOV cone (sensor range indicator)
+        ctx.strokeStyle = "#222";
+        ctx.lineWidth = 0.5;
+        const fovRange = 2.5 * PPM;
+        ctx.beginPath();
+        ctx.moveTo(rx, ry);
+        ctx.lineTo(rx + fovRange * Math.cos(robot.theta + 0.5), ry - fovRange * Math.sin(robot.theta + 0.5));
+        ctx.moveTo(rx, ry);
+        ctx.lineTo(rx + fovRange * Math.cos(robot.theta - 0.5), ry - fovRange * Math.sin(robot.theta - 0.5));
+        ctx.stroke();
+
+        // Update sidebar
+        document.getElementById("s-pos").textContent = `(${robot.x.toFixed(2)}, ${robot.y.toFixed(2)})`;
+        document.getElementById("s-hdg").textContent = `${(robot.theta * 180 / Math.PI).toFixed(0)} deg`;
+        document.getElementById("s-mode").textContent = robot.mode + (robot.goal ? ` -> ${robot.goal}` : "");
+        document.getElementById("s-speed").textContent = `${robot.speed.toFixed(2)} m/s`;
+        document.getElementById("s-voxels").textContent = robot.exploredCells.size + robot.wallCells.size;
+        document.getElementById("s-signs").textContent = Object.keys(robot.discovered).length;
+        document.getElementById("s-dist").textContent = `${robot.totalDist.toFixed(1)} m`;
+
+        const lmList = Object.entries(robot.discovered).map(([l, p]) => `${l} (${p.x.toFixed(1)}, ${p.y.toFixed(1)})`).join("\n");
+        document.getElementById("s-landmarks").textContent = lmList || "None yet";
+    }
+
+    // --- Main Loop ---
+    let lastTime = performance.now();
+    function loop(now) {
+        const realDt = (now - lastTime) / 1000;
+        lastTime = now;
+        const dt = Math.min(realDt, 0.1) * simSpeed;
+
+        simStep(dt);
+        render();
+        requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+    // --- Controls ---
+    document.getElementById("btn-explore").addEventListener("click", () => {
+        robot.mode = "EXPLORE";
+        robot.goal = null;
+        addLog("[CMD] Mode: EXPLORE");
+    });
+
+    document.getElementById("btn-reset").addEventListener("click", () => {
+        robot.x = -6; robot.y = 0; robot.theta = 0;
+        robot.path = []; robot.discovered = {};
+        robot.exploredCells = new Set(); robot.wallCells = new Set();
+        robot.totalDist = 0; robot.mode = "EXPLORE"; robot.goal = null;
+        logEntries = [];
+        addLog("[SYS] Reset complete");
+    });
+
+    document.getElementById("speed-select").addEventListener("change", (e) => {
+        simSpeed = parseInt(e.target.value);
+    });
+
+    function handleCommand(cmd) {
+        cmd = cmd.trim().toLowerCase();
+        if (!cmd) return;
+
+        if (cmd === "stop") {
+            robot.mode = "STOPPED";
+            addLog("[CMD] Stopped");
+        } else if (cmd === "explore") {
+            robot.mode = "EXPLORE";
+            robot.goal = null;
+            addLog("[CMD] Mode: EXPLORE");
+        } else if (cmd.startsWith("go to ") || cmd.startsWith("navigate to ")) {
+            const target = cmd.replace(/^(go to |navigate to )/, "").trim().toUpperCase();
+            robot.goal = target;
+            robot.mode = "NAVIGATE";
+            if (target in robot.discovered) {
+                addLog(`[CMD] Navigating to ${target} (known location)`, "goal");
+            } else {
+                addLog(`[CMD] Navigating to ${target} (exploring to find it)`, "goal");
+            }
+        } else {
+            addLog(`[CMD] Unknown: ${cmd}`);
+        }
+    }
+
+    document.getElementById("btn-send").addEventListener("click", () => {
+        const input = document.getElementById("command-input");
+        handleCommand(input.value);
+        input.value = "";
+    });
+
+    document.getElementById("command-input").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            handleCommand(e.target.value);
+            e.target.value = "";
+        }
+    });
+
+    // Start
+    addLog("[SYS] Simulation started");
+    addLog("[AGV] Mode: EXPLORE");
+    addLog("[SYS] Type 'go to H4' to navigate");
+    </script>
+</body>
+</html>
